@@ -60,7 +60,7 @@ class Config:
     DB_NAME = DB_NAME
     
     # Admin
-    ADMIN = ADMIN
+    ADMINS = ADMINS
     LOG_CHANNEL = LOG_CHANNEL
     
     # Directories
