@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Telegram Subtitle Embedder Bot - Pyrogram Version (Fully Patched)
-Main bot file with improvements
+Telegram Subtitle Embedder Bot - Pyrogram Version
+Main bot file with database integration
 """
 
 import os
@@ -12,7 +12,10 @@ from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, 
 from pathlib import Path
 import asyncio
 from subtitle_embedder import embed_multiple_subtitles
-from config import API_ID, API_HASH, BOT_TOKEN, DOWNLOAD_DIR, OUTPUT_DIR
+from config import API_ID, API_HASH, BOT_TOKEN, DOWNLOAD_DIR, OUTPUT_DIR, THUMB_DIR
+from database import db
+from utils import check_user_ban, format_caption
+import commands
 
 # Enable logging
 logging.basicConfig(
@@ -41,17 +44,18 @@ class UserSession:
         self.video_file = None
         self.video_path = None
         self.video_message = None
-        self.video_is_document = False  # Track if video was sent as document
+        self.video_is_document = False
         self.subtitle_files = []
         self.subtitle_paths = []
-        self.subtitle_messages = []  # Store subtitle message IDs for language selection
+        self.subtitle_messages = []
         self.thumbnail = None
         self.thumbnail_path = None
         self.languages = []
         self.titles = []
-        self.state = 'idle'  # idle, waiting_for_video, waiting_for_subtitles
+        self.state = 'idle'
         self.file_name = None
-        self.pending_language_selections = {}  # subtitle_index -> message_id
+        self.file_size = 0
+        self.pending_language_selections = {}
 
 # Language selection keyboard
 def create_language_keyboard(subtitle_index):
@@ -82,6 +86,22 @@ def create_language_keyboard(subtitle_index):
         ]
     ]
     return InlineKeyboardMarkup(keyboard)
+
+# Middleware to check if user is banned
+@app.on_message(filters.private, group=-1)
+async def check_ban(client: Client, message: Message):
+    """Check if user is banned before processing any message"""
+    user_id = message.from_user.id
+    
+    is_banned, ban_reason = await check_user_ban(db, user_id)
+    
+    if is_banned:
+        await message.reply_text(
+            f"🚫 **You are banned from using this bot**\n\n"
+            f"**Reason:** {ban_reason}\n\n"
+            f"Contact the bot admin if you think this is a mistake."
+        )
+        raise StopPropagation
 
 @app.on_callback_query(filters.regex(r"^lang_"))
 async def language_callback(client: Client, callback_query: CallbackQuery):
@@ -136,46 +156,61 @@ async def language_callback(client: Client, callback_query: CallbackQuery):
         await callback_query.answer("❌ Invalid subtitle index", show_alert=True)
 
 @app.on_message(filters.command("start"))
-async def start_command(client: Client, message: Message):
+async def start_handler(client: Client, message: Message):
     """Handle /start command"""
+    await commands.start_command(client, message)
     user_id = message.from_user.id
     user_sessions[user_id] = UserSession()
-    
-    welcome_message = """
-🎬 **Subtitle Embedder Bot**
-
-Welcome! I can embed subtitles into your video files.
-
-**How to use:**
-1. Send me a video file
-2. Send subtitle file(s) - you can send multiple
-3. Select language for each subtitle
-4. Send /done when you've sent all subtitles
-5. I'll process and send back your video with embedded subtitles
-
-**Supported formats:**
-📹 Video: MP4, MKV, AVI, MOV, etc.
-📝 Subtitles: SRT, ASS, SSA, VTT, SUB
-
-**Commands:**
-/start - Start the bot
-/cancel - Cancel current operation
-/help - Show this message
-
-**Features:**
-✨ Supports files up to 4GB
-✨ Multiple subtitle tracks
-✨ Preserves video quality
-✨ Keeps original thumbnail
-✨ Manual language selection
-✨ Preserves original filename
-"""
-    await message.reply_text(welcome_message)
 
 @app.on_message(filters.command("help"))
-async def help_command(client: Client, message: Message):
+async def help_handler(client: Client, message: Message):
     """Handle /help command"""
-    await start_command(client, message)
+    await commands.help_command(client, message)
+
+@app.on_message(filters.command("set_caption"))
+async def set_caption_handler(client: Client, message: Message):
+    """Handle /set_caption command"""
+    await commands.set_caption_command(client, message)
+
+@app.on_message(filters.command("see_caption"))
+async def see_caption_handler(client: Client, message: Message):
+    """Handle /see_caption command"""
+    await commands.see_caption_command(client, message)
+
+@app.on_message(filters.command("del_caption"))
+async def del_caption_handler(client: Client, message: Message):
+    """Handle /del_caption command"""
+    await commands.del_caption_command(client, message)
+
+@app.on_message(filters.command("view_thumb"))
+async def view_thumb_handler(client: Client, message: Message):
+    """Handle /view_thumb command"""
+    await commands.view_thumb_command(client, message)
+
+@app.on_message(filters.command("del_thumb"))
+async def del_thumb_handler(client: Client, message: Message):
+    """Handle /del_thumb command"""
+    await commands.del_thumb_command(client, message)
+
+@app.on_message(filters.command("users"))
+async def users_handler(client: Client, message: Message):
+    """Handle /users command"""
+    await commands.users_command(client, message)
+
+@app.on_message(filters.command("ban"))
+async def ban_handler(client: Client, message: Message):
+    """Handle /ban command"""
+    await commands.ban_command(client, message)
+
+@app.on_message(filters.command("unban"))
+async def unban_handler(client: Client, message: Message):
+    """Handle /unban command"""
+    await commands.unban_command(client, message)
+
+@app.on_message(filters.command("broadcast"))
+async def broadcast_handler(client: Client, message: Message):
+    """Handle /broadcast command"""
+    await commands.broadcast_command(client, message)
 
 @app.on_message(filters.command("cancel"))
 async def cancel_command(client: Client, message: Message):
@@ -234,27 +269,44 @@ async def done_command(client: Client, message: Message):
         # Send the processed video back
         await status_msg.edit_text("📤 Uploading processed video...")
         
-        # Get original file size
+        # Get file size
         file_size = os.path.getsize(output_file)
         file_size_mb = file_size / (1024 * 1024)
         
-        caption = f"✅ **Processed Successfully!**\n\n"
-        caption += f"📊 Subtitles: {len(session.subtitle_paths)} track(s) embedded\n"
-        caption += f"📦 Size: {file_size_mb:.2f} MB\n"
-        caption += f"🎬 File: `{session.file_name}`"
+        # Get custom caption or use default
+        custom_caption = await db.get_caption(user_id)
+        if custom_caption:
+            caption = format_caption(custom_caption, session.file_name, file_size)
+        else:
+            caption = f"✅ **Processed Successfully!**\n\n"
+            caption += f"📊 Subtitles: {len(session.subtitle_paths)} track(s) embedded\n"
+            caption += f"📦 Size: {file_size_mb:.2f} MB\n"
+            caption += f"🎬 File: `{session.file_name}`"
         
-        # Get default thumbnail (first frame)
+        # Get thumbnail - custom or default
         thumb = None
-        if session.thumbnail_path and os.path.exists(session.thumbnail_path):
+        custom_thumb_id = await db.get_thumbnail(user_id)
+        
+        if custom_thumb_id:
+            # Download custom thumbnail
+            thumb_path = THUMB_DIR / f"{user_id}.jpg"
+            try:
+                await client.download_media(custom_thumb_id, file_name=str(thumb_path))
+                thumb = str(thumb_path)
+            except Exception as e:
+                logger.error(f"Error downloading custom thumbnail: {e}")
+                # Fall back to video thumbnail
+                if session.thumbnail_path and os.path.exists(session.thumbnail_path):
+                    thumb = session.thumbnail_path
+        elif session.thumbnail_path and os.path.exists(session.thumbnail_path):
             thumb = session.thumbnail_path
         
-        # Initialize progress tracker for this upload
+        # Initialize progress tracker for upload
         tracker_key = f"{user_id}_upload"
         progress_trackers[tracker_key] = time.time()
         
-        # Send video based on how it was received (video or document)
+        # Send video based on how it was received
         if session.video_is_document:
-            # Send as document
             await client.send_document(
                 chat_id=message.chat.id,
                 document=str(output_file),
@@ -265,7 +317,6 @@ async def done_command(client: Client, message: Message):
                 progress_args=(status_msg, "Uploading", tracker_key)
             )
         else:
-            # Send as video
             await client.send_video(
                 chat_id=message.chat.id,
                 video=str(output_file),
@@ -293,6 +344,32 @@ async def done_command(client: Client, message: Message):
         cleanup_user_files(user_id)
         user_sessions[user_id] = UserSession()
 
+@app.on_message(filters.photo)
+async def handle_photo(client: Client, message: Message):
+    """Handle photo uploads for thumbnail"""
+    user_id = message.from_user.id
+    
+    try:
+        # Get the largest photo
+        photo = message.photo
+        
+        # Download photo
+        thumb_path = THUMB_DIR / f"{user_id}.jpg"
+        await message.download(file_name=str(thumb_path))
+        
+        # Save file_id to database
+        await db.set_thumbnail(user_id, photo.file_id)
+        
+        await message.reply_text(
+            "✅ **Thumbnail saved successfully!**\n\n"
+            "This thumbnail will be used for all your processed videos.\n\n"
+            "Use /view_thumb to see it or /del_thumb to delete it."
+        )
+        
+    except Exception as e:
+        logger.error(f"Error saving thumbnail for user {user_id}: {e}")
+        await message.reply_text(f"❌ Error saving thumbnail: {str(e)}")
+
 @app.on_message(filters.video)
 async def handle_video(client: Client, message: Message):
     """Handle video file uploads"""
@@ -314,12 +391,13 @@ async def handle_video(client: Client, message: Message):
         # Get filename
         file_name = video.file_name or f"video_{user_id}_{int(time.time())}.mp4"
         session.file_name = file_name
+        session.file_size = video.file_size
         session.video_is_document = False
         
         # Download video with progress
         video_path = DOWNLOAD_DIR / f"{user_id}_{file_name}"
         
-        # Initialize progress tracker for this download
+        # Initialize progress tracker
         tracker_key = f"{user_id}_video_download"
         progress_trackers[tracker_key] = time.time()
         
@@ -337,7 +415,7 @@ async def handle_video(client: Client, message: Message):
         session.video_path = str(video_path)
         session.state = 'waiting_for_subtitles'
         
-        # Handle thumbnail - try to get from video or generate default
+        # Handle thumbnail
         if video.thumbs:
             try:
                 thumb_path = DOWNLOAD_DIR / f"{user_id}_thumb.jpg"
@@ -405,7 +483,7 @@ async def handle_document(client: Client, message: Message):
         # Download subtitle
         subtitle_path = DOWNLOAD_DIR / f"{user_id}_sub_{len(session.subtitle_paths)}_{document.file_name}"
         
-        # Initialize progress tracker for this subtitle download
+        # Initialize progress tracker
         tracker_key = f"{user_id}_subtitle_{len(session.subtitle_paths)}_download"
         progress_trackers[tracker_key] = time.time()
         
@@ -425,7 +503,7 @@ async def handle_document(client: Client, message: Message):
         session.subtitle_paths.append(str(subtitle_path))
         session.subtitle_messages.append(message.id)
         
-        # Initialize with 'und' language (user will select)
+        # Initialize with 'und' language
         session.languages.append('und')
         session.titles.append(document.file_name.rsplit('.', 1)[0])
         
@@ -468,12 +546,13 @@ async def handle_video_document(client: Client, message: Message):
         # Get filename
         file_name = document.file_name
         session.file_name = file_name
+        session.file_size = document.file_size
         session.video_is_document = True
         
         # Download video with progress
         video_path = DOWNLOAD_DIR / f"{user_id}_{file_name}"
         
-        # Initialize progress tracker for this download
+        # Initialize progress tracker
         tracker_key = f"{user_id}_video_document_download"
         progress_trackers[tracker_key] = time.time()
         
@@ -526,7 +605,6 @@ async def progress_callback(current, total, status_msg, action="Processing", tra
             
             try:
                 await status_msg.edit_text(text)
-                # Update the last update time for this operation
                 progress_trackers[tracker_key] = current_time
             except Exception as e:
                 logger.debug(f"Could not edit message: {e}")
@@ -584,8 +662,9 @@ def run_bot():
     # Create necessary directories
     DOWNLOAD_DIR.mkdir(exist_ok=True)
     OUTPUT_DIR.mkdir(exist_ok=True)
+    THUMB_DIR.mkdir(exist_ok=True)
     
-    logger.info("Starting Pyrogram bot...")
+    logger.info("Starting Pyrogram bot with database integration...")
     app.run()
 
 if __name__ == '__main__':
