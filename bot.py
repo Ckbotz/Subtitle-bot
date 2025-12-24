@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
+"""
+Telegram Subtitle Embedder Bot - Pyrogram Version (Patched)
+Main bot file with improvements
+"""
+
 import os
 import logging
+import time
 from pyrogram import Client, filters
-from pyrogram.types import Message
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pathlib import Path
 import asyncio
 from subtitle_embedder import embed_multiple_subtitles
@@ -32,14 +38,99 @@ class UserSession:
         self.video_file = None
         self.video_path = None
         self.video_message = None
+        self.video_is_document = False  # Track if video was sent as document
         self.subtitle_files = []
         self.subtitle_paths = []
+        self.subtitle_messages = []  # Store subtitle message IDs for language selection
         self.thumbnail = None
         self.thumbnail_path = None
         self.languages = []
         self.titles = []
         self.state = 'idle'  # idle, waiting_for_video, waiting_for_subtitles
         self.file_name = None
+        self.pending_language_selections = {}  # subtitle_index -> message_id
+
+# Language selection keyboard
+def create_language_keyboard(subtitle_index):
+    """Create inline keyboard for language selection"""
+    keyboard = [
+        [
+            InlineKeyboardButton("🇬🇧 English", callback_data=f"lang_{subtitle_index}_eng"),
+            InlineKeyboardButton("🇪🇸 Spanish", callback_data=f"lang_{subtitle_index}_spa"),
+            InlineKeyboardButton("🇫🇷 French", callback_data=f"lang_{subtitle_index}_fre")
+        ],
+        [
+            InlineKeyboardButton("🇩🇪 German", callback_data=f"lang_{subtitle_index}_ger"),
+            InlineKeyboardButton("🇮🇹 Italian", callback_data=f"lang_{subtitle_index}_ita"),
+            InlineKeyboardButton("🇵🇹 Portuguese", callback_data=f"lang_{subtitle_index}_por")
+        ],
+        [
+            InlineKeyboardButton("🇷🇺 Russian", callback_data=f"lang_{subtitle_index}_rus"),
+            InlineKeyboardButton("🇯🇵 Japanese", callback_data=f"lang_{subtitle_index}_jpn"),
+            InlineKeyboardButton("🇰🇷 Korean", callback_data=f"lang_{subtitle_index}_kor")
+        ],
+        [
+            InlineKeyboardButton("🇨🇳 Chinese", callback_data=f"lang_{subtitle_index}_chi"),
+            InlineKeyboardButton("🇮🇳 Hindi", callback_data=f"lang_{subtitle_index}_hin"),
+            InlineKeyboardButton("🇸🇦 Arabic", callback_data=f"lang_{subtitle_index}_ara")
+        ],
+        [
+            InlineKeyboardButton("❓ Unknown", callback_data=f"lang_{subtitle_index}_und")
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+@app.on_callback_query(filters.regex(r"^lang_"))
+async def language_callback(client: Client, callback_query: CallbackQuery):
+    """Handle language selection callback"""
+    user_id = callback_query.from_user.id
+    
+    if user_id not in user_sessions:
+        await callback_query.answer("❌ Session expired. Please start again.", show_alert=True)
+        return
+    
+    session = user_sessions[user_id]
+    
+    # Parse callback data: lang_index_code
+    parts = callback_query.data.split('_')
+    subtitle_index = int(parts[1])
+    language_code = parts[2]
+    
+    # Update language for this subtitle
+    if subtitle_index < len(session.languages):
+        session.languages[subtitle_index] = language_code
+        
+        # Language name mapping
+        lang_names = {
+            'eng': '🇬🇧 English',
+            'spa': '🇪🇸 Spanish',
+            'fre': '🇫🇷 French',
+            'ger': '🇩🇪 German',
+            'ita': '🇮🇹 Italian',
+            'por': '🇵🇹 Portuguese',
+            'rus': '🇷🇺 Russian',
+            'jpn': '🇯🇵 Japanese',
+            'kor': '🇰🇷 Korean',
+            'chi': '🇨🇳 Chinese',
+            'hin': '🇮🇳 Hindi',
+            'ara': '🇸🇦 Arabic',
+            'und': '❓ Unknown'
+        }
+        
+        lang_name = lang_names.get(language_code, language_code)
+        
+        # Update the message
+        try:
+            await callback_query.edit_message_text(
+                f"✅ Subtitle {subtitle_index + 1} language set to: {lang_name}\n\n"
+                f"Send more subtitles or /done to process."
+            )
+        except:
+            pass
+        
+        await callback_query.answer(f"Language set to {lang_name}")
+    else:
+        await callback_query.answer("❌ Invalid subtitle index", show_alert=True)
 
 @app.on_message(filters.command("start"))
 async def start_command(client: Client, message: Message):
@@ -55,8 +146,9 @@ Welcome! I can embed subtitles into your video files.
 **How to use:**
 1. Send me a video file
 2. Send subtitle file(s) - you can send multiple
-3. Send /done when you've sent all subtitles
-4. I'll process and send back your video with embedded subtitles
+3. Select language for each subtitle
+4. Send /done when you've sent all subtitles
+5. I'll process and send back your video with embedded subtitles
 
 **Supported formats:**
 📹 Video: MP4, MKV, AVI, MOV, etc.
@@ -72,7 +164,8 @@ Welcome! I can embed subtitles into your video files.
 ✨ Multiple subtitle tracks
 ✨ Preserves video quality
 ✨ Keeps original thumbnail
-✨ Auto-detects language
+✨ Manual language selection
+✨ Preserves original filename
 """
     await message.reply_text(welcome_message)
 
@@ -147,20 +240,35 @@ async def done_command(client: Client, message: Message):
         caption += f"📦 Size: {file_size_mb:.2f} MB\n"
         caption += f"🎬 File: `{session.file_name}`"
         
-        # Send with thumbnail if available
-        thumb = session.thumbnail_path if session.thumbnail_path and os.path.exists(session.thumbnail_path) else None
+        # Get default thumbnail (first frame)
+        thumb = None
+        if session.thumbnail_path and os.path.exists(session.thumbnail_path):
+            thumb = session.thumbnail_path
         
-        # Send video with progress
-        await client.send_video(
-            chat_id=message.chat.id,
-            video=str(output_file),
-            caption=caption,
-            thumb=thumb,
-            supports_streaming=True,
-            file_name=session.file_name,
-            progress=progress_callback,
-            progress_args=(status_msg, "Uploading")
-        )
+        # Send video based on how it was received (video or document)
+        if session.video_is_document:
+            # Send as document
+            await client.send_document(
+                chat_id=message.chat.id,
+                document=str(output_file),
+                caption=caption,
+                thumb=thumb,
+                file_name=session.file_name,
+                progress=progress_callback,
+                progress_args=(status_msg, "Uploading", time.time())
+            )
+        else:
+            # Send as video
+            await client.send_video(
+                chat_id=message.chat.id,
+                video=str(output_file),
+                caption=caption,
+                thumb=thumb,
+                supports_streaming=True,
+                file_name=session.file_name,
+                progress=progress_callback,
+                progress_args=(status_msg, "Uploading", time.time())
+            )
         
         await status_msg.delete()
         await message.reply_text("✅ Done! Send another video to process more files.")
@@ -193,8 +301,9 @@ async def handle_video(client: Client, message: Message):
     
     try:
         # Get filename
-        file_name = video.file_name or f"video_{user_id}.mp4"
+        file_name = video.file_name or f"video_{user_id}_{int(time.time())}.mp4"
         session.file_name = file_name
+        session.video_is_document = False
         
         # Download video with progress
         video_path = DOWNLOAD_DIR / f"{user_id}_{file_name}"
@@ -202,14 +311,14 @@ async def handle_video(client: Client, message: Message):
         await message.download(
             file_name=str(video_path),
             progress=progress_callback,
-            progress_args=(status_msg, "Downloading video")
+            progress_args=(status_msg, "Downloading video", time.time())
         )
         
         session.video_message = message
         session.video_path = str(video_path)
         session.state = 'waiting_for_subtitles'
         
-        # Handle thumbnail
+        # Handle thumbnail - try to get from video or generate default
         if video.thumbs:
             try:
                 thumb_path = DOWNLOAD_DIR / f"{user_id}_thumb.jpg"
@@ -280,28 +389,33 @@ async def handle_document(client: Client, message: Message):
         await message.download(
             file_name=str(subtitle_path),
             progress=progress_callback,
-            progress_args=(status_msg, "Downloading subtitle")
+            progress_args=(status_msg, "Downloading subtitle", time.time())
         )
+        
+        subtitle_index = len(session.subtitle_paths)
         
         session.subtitle_files.append(document)
         session.subtitle_paths.append(str(subtitle_path))
+        session.subtitle_messages.append(message.id)
         
-        # Try to extract language from filename
-        filename_lower = document.file_name.lower()
-        language = extract_language_from_filename(filename_lower)
-        session.languages.append(language)
+        # Initialize with 'und' language (user will select)
+        session.languages.append('und')
         session.titles.append(document.file_name.rsplit('.', 1)[0])
         
         await status_msg.delete()
         
         file_size_kb = document.file_size / 1024
-        await message.reply_text(
+        
+        # Send language selection keyboard
+        lang_msg = await message.reply_text(
             f"✅ Subtitle {len(session.subtitle_paths)} received!\n\n"
             f"📄 **Name:** `{document.file_name}`\n"
-            f"📦 **Size:** {file_size_kb:.2f} KB\n"
-            f"🌍 **Language:** {language}\n\n"
-            f"Send more subtitles or /done to process."
+            f"📦 **Size:** {file_size_kb:.2f} KB\n\n"
+            f"🌍 **Please select the language for this subtitle:**",
+            reply_markup=create_language_keyboard(subtitle_index)
         )
+        
+        session.pending_language_selections[subtitle_index] = lang_msg.id
         
     except Exception as e:
         logger.error(f"Error downloading subtitle for user {user_id}: {e}")
@@ -327,6 +441,7 @@ async def handle_video_document(client: Client, message: Message):
         # Get filename
         file_name = document.file_name
         session.file_name = file_name
+        session.video_is_document = True
         
         # Download video with progress
         video_path = DOWNLOAD_DIR / f"{user_id}_{file_name}"
@@ -334,7 +449,7 @@ async def handle_video_document(client: Client, message: Message):
         await message.download(
             file_name=str(video_path),
             progress=progress_callback,
-            progress_args=(status_msg, "Downloading video")
+            progress_args=(status_msg, "Downloading video", time.time())
         )
         
         session.video_message = message
@@ -357,20 +472,24 @@ async def handle_video_document(client: Client, message: Message):
         logger.error(f"Error downloading video for user {user_id}: {e}")
         await status_msg.edit_text(f"❌ Error downloading video: {str(e)}")
 
-async def progress_callback(current, total, status_msg, action="Processing"):
-    """Progress callback for downloads/uploads"""
+async def progress_callback(current, total, status_msg, action="Processing", last_update_time=None):
+    """Progress callback for downloads/uploads with 10 second interval"""
     try:
-        percentage = (current / total) * 100
+        current_time = time.time()
         
-        # Update every 5%
-        if int(percentage) % 5 == 0:
+        # Update only every 10 seconds
+        if last_update_time is None or (current_time - last_update_time) >= 10:
+            percentage = (current / total) * 100
             progress_bar = create_progress_bar(percentage)
             text = f"{action}... {percentage:.1f}%\n{progress_bar}\n{format_bytes(current)} / {format_bytes(total)}"
             
             try:
                 await status_msg.edit_text(text)
-            except:
-                pass  # Ignore FloodWait and other errors
+                # Update the last update time in the args
+                return current_time
+            except Exception as e:
+                logger.debug(f"Could not edit message: {e}")
+                pass
     except Exception as e:
         logger.debug(f"Progress callback error: {e}")
 
@@ -403,29 +522,6 @@ def format_duration(seconds):
         return f"{minutes}m {secs}s"
     else:
         return f"{secs}s"
-
-def extract_language_from_filename(filename):
-    """Extract language code from filename"""
-    language_codes = {
-        'eng': 'eng', 'en': 'eng', 'english': 'eng',
-        'spa': 'spa', 'es': 'spa', 'spanish': 'spa',
-        'fre': 'fre', 'fr': 'fre', 'french': 'fre',
-        'ger': 'ger', 'de': 'ger', 'german': 'ger',
-        'ita': 'ita', 'it': 'ita', 'italian': 'ita',
-        'por': 'por', 'pt': 'por', 'portuguese': 'por',
-        'rus': 'rus', 'ru': 'rus', 'russian': 'rus',
-        'jpn': 'jpn', 'ja': 'jpn', 'japanese': 'jpn',
-        'kor': 'kor', 'ko': 'kor', 'korean': 'kor',
-        'chi': 'chi', 'zh': 'chi', 'chinese': 'chi',
-        'ara': 'ara', 'ar': 'ara', 'arabic': 'ara',
-        'hin': 'hin', 'hi': 'hin', 'hindi': 'hin',
-    }
-    
-    for code, standard in language_codes.items():
-        if code in filename:
-            return standard
-    
-    return 'und'  # undefined
 
 def cleanup_user_files(user_id):
     """Clean up all files for a user"""
