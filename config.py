@@ -6,6 +6,16 @@ API_ID = int(os.environ.get('API_ID', '0'))
 API_HASH = os.environ.get('API_HASH', 'your_api_hash_here')
 BOT_TOKEN = os.environ.get('BOT_TOKEN', 'your_bot_token_here')
 
+# MongoDB Configuration
+DB_URL = os.environ.get("DB_URL", "mongodb://localhost:27017")
+DB_NAME = os.environ.get("DB_NAME", "subtitle_bot")
+
+# Admin Configuration (comma-separated user IDs)
+ADMINS = [int(x) for x in os.environ.get("ADMINS", "0").split(",") if x.strip()]
+
+# Log Channel (optional - for user join logs)
+LOG_CHANNEL = int(os.environ.get("LOG_CHANNEL", "0")) if os.environ.get("LOG_CHANNEL") else None
+
 # Web server configuration
 WEB_SERVER_PORT = int(os.environ.get('PORT', 8080))
 WEB_SERVER_HOST = os.environ.get('HOST', '0.0.0.0')
@@ -36,4 +46,43 @@ LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO')
 
 # Bot information
 BOT_NAME = "Subtitle Embedder Bot"
-BOT_VERSION = "2.0.0 (Pyrogram)"
+BOT_VERSION = "2.0.0 (Pyrogram - Integrated)"
+
+# Config class for compatibility with database and admin panel
+class Config:
+    # Telegram API
+    API_ID = API_ID
+    API_HASH = API_HASH
+    BOT_TOKEN = BOT_TOKEN
+    
+    # Database
+    DB_URL = DB_URL
+    DB_NAME = DB_NAME
+    
+    # Admin
+    ADMIN = ADMIN
+    LOG_CHANNEL = LOG_CHANNEL
+    
+    # Directories
+    DOWNLOAD_DIR = DOWNLOAD_DIR
+    OUTPUT_DIR = OUTPUT_DIR
+    SESSION_DIR = SESSION_DIR
+    
+    # FFmpeg
+    FFMPEG_PATH = FFMPEG_PATH
+    
+    # File Limits
+    MAX_VIDEO_SIZE = MAX_VIDEO_SIZE
+    MAX_SUBTITLE_SIZE = MAX_SUBTITLE_SIZE
+    TELEGRAM_MAX_FILE_SIZE = TELEGRAM_MAX_FILE_SIZE
+    
+    # Web Server
+    WEB_SERVER_PORT = WEB_SERVER_PORT
+    WEB_SERVER_HOST = WEB_SERVER_HOST
+    
+    # Logging
+    LOG_LEVEL = LOG_LEVEL
+    
+    # Bot Info
+    BOT_NAME = BOT_NAME
+    BOT_VERSION = BOT_VERSION
