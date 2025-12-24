@@ -2,6 +2,7 @@
 """
 Subtitle Embedder - Complete Bot Compatible Version
 Copies only video and audio streams, replaces original subtitles with new ones
+Fixed output path handling
 """
 
 import os
@@ -9,6 +10,7 @@ import subprocess
 from pathlib import Path
 import logging
 import json
+import shutil
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +75,29 @@ def get_subtitle_format(subtitle_file):
         '.sub': 'subrip'
     }
     return formats.get(ext, 'srt')
+
+def ensure_output_directory(output_file):
+    """
+    Ensure the output directory exists
+    
+    Args:
+        output_file: Path to output file
+    
+    Returns:
+        bool: True if directory exists or was created successfully
+    """
+    try:
+        output_path = Path(output_file)
+        output_dir = output_path.parent
+        
+        if not output_dir.exists():
+            output_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Created output directory: {output_dir}")
+        
+        return True
+    except Exception as e:
+        logger.error(f"Error creating output directory: {e}")
+        return False
 
 def get_video_info(video_file):
     """
@@ -187,17 +212,32 @@ def embed_multiple_subtitles(video_file, subtitle_files, output_file=None, langu
             logger.error(f"Subtitle file not found: {sub_file}")
             return False
     
+    # Convert to Path objects
+    video_path = Path(video_file)
+    
     # Generate output filename if not provided
     if output_file is None:
-        video_path = Path(video_file)
         output_file = video_path.parent / f"{video_path.stem}_with_subtitles{video_path.suffix}"
     
-    # Ensure output directory exists
+    # Convert output to Path and ensure it's a clean path
     output_path = Path(output_file)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Log the paths for debugging
+    logger.info(f"Input video path: {video_file}")
+    logger.info(f"Output video path: {output_file}")
+    
+    # Ensure output directory exists
+    if not ensure_output_directory(output_file):
+        logger.error("Failed to create output directory")
+        return False
+    
+    # Check if output path is valid
+    if not output_path.parent.exists():
+        logger.error(f"Output directory does not exist: {output_path.parent}")
+        return False
     
     # Detect video container format
-    video_ext = Path(video_file).suffix.lower()
+    video_ext = video_path.suffix.lower()
     is_mp4 = video_ext in ['.mp4', '.m4v']
     is_mkv = video_ext in ['.mkv', '.webm']
     
@@ -210,12 +250,15 @@ def embed_multiple_subtitles(video_file, subtitle_files, output_file=None, langu
     # Build FFmpeg command
     cmd = ['ffmpeg']
     
+    # Add global options
+    cmd.extend(['-hide_banner', '-loglevel', 'warning'])
+    
     # Input video file
-    cmd.extend(['-i', video_file])
+    cmd.extend(['-i', str(video_file)])
     
     # Add all subtitle files as inputs
     for sub_file in subtitle_files:
-        cmd.extend(['-i', sub_file])
+        cmd.extend(['-i', str(sub_file)])
     
     # Map ONLY video and audio streams from original file (excludes original subtitles)
     # The ? makes it optional - won't fail if stream type doesn't exist
@@ -277,10 +320,11 @@ def embed_multiple_subtitles(video_file, subtitle_files, output_file=None, langu
     # Additional options for better compatibility
     cmd.extend([
         '-movflags', '+faststart',  # Enable fast start for MP4 (web streaming)
+        '-max_muxing_queue_size', '9999',  # Prevent muxing queue overflow
         '-y'  # Overwrite output file without asking
     ])
     
-    # Add output file
+    # Add output file (ensure it's a string)
     cmd.append(str(output_file))
     
     # Log processing information
@@ -323,7 +367,10 @@ def embed_multiple_subtitles(video_file, subtitle_files, output_file=None, langu
                 
                 return True
             else:
-                logger.error("✗ Output file was not created")
+                logger.error(f"✗ Output file was not created: {output_file}")
+                logger.error(f"Expected output path: {output_file}")
+                logger.error(f"Output directory exists: {output_path.parent.exists()}")
+                logger.error(f"Output directory writable: {os.access(output_path.parent, os.W_OK)}")
                 return False
         else:
             logger.error("✗ FFmpeg processing failed")
@@ -345,6 +392,9 @@ def embed_multiple_subtitles(video_file, subtitle_files, output_file=None, langu
         return False
     except Exception as e:
         logger.error(f"✗ Exception during FFmpeg processing: {e}")
+        logger.error(f"Exception type: {type(e).__name__}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
         return False
 
 def validate_subtitle_file(subtitle_file):
@@ -414,6 +464,21 @@ def get_ffmpeg_version():
     except Exception as e:
         logger.error(f"Error getting FFmpeg version: {e}")
         return None
+
+def cleanup_temp_files(*file_paths):
+    """
+    Clean up temporary files
+    
+    Args:
+        *file_paths: Variable number of file paths to delete
+    """
+    for file_path in file_paths:
+        try:
+            if file_path and os.path.exists(file_path):
+                os.remove(file_path)
+                logger.debug(f"Cleaned up temp file: {file_path}")
+        except Exception as e:
+            logger.warning(f"Could not delete temp file {file_path}: {e}")
 
 # Initialize and check dependencies on import
 if __name__ != '__main__':
