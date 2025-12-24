@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Telegram Subtitle Embedder Bot - Pyrogram Version (Patched)
+Telegram Subtitle Embedder Bot - Pyrogram Version (Fully Patched)
 Main bot file with improvements
 """
 
@@ -32,6 +32,9 @@ app = Client(
 
 # User session data structure
 user_sessions = {}
+
+# Track last update time for progress callbacks
+progress_trackers = {}
 
 class UserSession:
     def __init__(self):
@@ -245,6 +248,10 @@ async def done_command(client: Client, message: Message):
         if session.thumbnail_path and os.path.exists(session.thumbnail_path):
             thumb = session.thumbnail_path
         
+        # Initialize progress tracker for this upload
+        tracker_key = f"{user_id}_upload"
+        progress_trackers[tracker_key] = time.time()
+        
         # Send video based on how it was received (video or document)
         if session.video_is_document:
             # Send as document
@@ -255,7 +262,7 @@ async def done_command(client: Client, message: Message):
                 thumb=thumb,
                 file_name=session.file_name,
                 progress=progress_callback,
-                progress_args=(status_msg, "Uploading", time.time())
+                progress_args=(status_msg, "Uploading", tracker_key)
             )
         else:
             # Send as video
@@ -267,8 +274,12 @@ async def done_command(client: Client, message: Message):
                 supports_streaming=True,
                 file_name=session.file_name,
                 progress=progress_callback,
-                progress_args=(status_msg, "Uploading", time.time())
+                progress_args=(status_msg, "Uploading", tracker_key)
             )
+        
+        # Clean up progress tracker
+        if tracker_key in progress_trackers:
+            del progress_trackers[tracker_key]
         
         await status_msg.delete()
         await message.reply_text("✅ Done! Send another video to process more files.")
@@ -308,11 +319,19 @@ async def handle_video(client: Client, message: Message):
         # Download video with progress
         video_path = DOWNLOAD_DIR / f"{user_id}_{file_name}"
         
+        # Initialize progress tracker for this download
+        tracker_key = f"{user_id}_video_download"
+        progress_trackers[tracker_key] = time.time()
+        
         await message.download(
             file_name=str(video_path),
             progress=progress_callback,
-            progress_args=(status_msg, "Downloading video", time.time())
+            progress_args=(status_msg, "Downloading video", tracker_key)
         )
+        
+        # Clean up progress tracker
+        if tracker_key in progress_trackers:
+            del progress_trackers[tracker_key]
         
         session.video_message = message
         session.video_path = str(video_path)
@@ -386,11 +405,19 @@ async def handle_document(client: Client, message: Message):
         # Download subtitle
         subtitle_path = DOWNLOAD_DIR / f"{user_id}_sub_{len(session.subtitle_paths)}_{document.file_name}"
         
+        # Initialize progress tracker for this subtitle download
+        tracker_key = f"{user_id}_subtitle_{len(session.subtitle_paths)}_download"
+        progress_trackers[tracker_key] = time.time()
+        
         await message.download(
             file_name=str(subtitle_path),
             progress=progress_callback,
-            progress_args=(status_msg, "Downloading subtitle", time.time())
+            progress_args=(status_msg, "Downloading subtitle", tracker_key)
         )
+        
+        # Clean up progress tracker
+        if tracker_key in progress_trackers:
+            del progress_trackers[tracker_key]
         
         subtitle_index = len(session.subtitle_paths)
         
@@ -446,11 +473,19 @@ async def handle_video_document(client: Client, message: Message):
         # Download video with progress
         video_path = DOWNLOAD_DIR / f"{user_id}_{file_name}"
         
+        # Initialize progress tracker for this download
+        tracker_key = f"{user_id}_video_document_download"
+        progress_trackers[tracker_key] = time.time()
+        
         await message.download(
             file_name=str(video_path),
             progress=progress_callback,
-            progress_args=(status_msg, "Downloading video", time.time())
+            progress_args=(status_msg, "Downloading video", tracker_key)
         )
+        
+        # Clean up progress tracker
+        if tracker_key in progress_trackers:
+            del progress_trackers[tracker_key]
         
         session.video_message = message
         session.video_path = str(video_path)
@@ -472,21 +507,27 @@ async def handle_video_document(client: Client, message: Message):
         logger.error(f"Error downloading video for user {user_id}: {e}")
         await status_msg.edit_text(f"❌ Error downloading video: {str(e)}")
 
-async def progress_callback(current, total, status_msg, action="Processing", last_update_time=None):
+async def progress_callback(current, total, status_msg, action="Processing", tracker_key=None):
     """Progress callback for downloads/uploads with 10 second interval"""
     try:
         current_time = time.time()
         
+        # Get the last update time for this specific operation
+        if tracker_key is None:
+            tracker_key = "default"
+        
+        last_update_time = progress_trackers.get(tracker_key, 0)
+        
         # Update only every 10 seconds
-        if last_update_time is None or (current_time - last_update_time) >= 10:
+        if (current_time - last_update_time) >= 10:
             percentage = (current / total) * 100
             progress_bar = create_progress_bar(percentage)
             text = f"{action}... {percentage:.1f}%\n{progress_bar}\n{format_bytes(current)} / {format_bytes(total)}"
             
             try:
                 await status_msg.edit_text(text)
-                # Update the last update time in the args
-                return current_time
+                # Update the last update time for this operation
+                progress_trackers[tracker_key] = current_time
             except Exception as e:
                 logger.debug(f"Could not edit message: {e}")
                 pass
