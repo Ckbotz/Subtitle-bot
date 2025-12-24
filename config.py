@@ -1,3 +1,9 @@
+#!/usr/bin/env python3
+"""
+Configuration file for Subtitle Embedder Bot
+Enhanced with all necessary settings
+"""
+
 import os
 from pathlib import Path
 
@@ -11,7 +17,7 @@ DB_URL = os.environ.get("DB_URL", "mongodb://localhost:27017")
 DB_NAME = os.environ.get("DB_NAME", "subtitle_bot")
 
 # Admin Configuration (comma-separated user IDs)
-ADMINS = [int(x) for x in os.environ.get("ADMINS", "0").split(",") if x.strip()]
+ADMINS = [int(x) for x in os.environ.get("ADMINS", "0").split(",") if x.strip() and x != "0"]
 
 # Log Channel (optional - for user join logs)
 LOG_CHANNEL = int(os.environ.get("LOG_CHANNEL", "0")) if os.environ.get("LOG_CHANNEL") else None
@@ -25,11 +31,13 @@ BASE_DIR = Path(__file__).parent
 DOWNLOAD_DIR = BASE_DIR / 'downloads'
 OUTPUT_DIR = BASE_DIR / 'output'
 SESSION_DIR = BASE_DIR / 'sessions'
+THUMB_DIR = BASE_DIR / 'thumbnails'
 
 # Create directories if they don't exist
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 SESSION_DIR.mkdir(exist_ok=True)
+THUMB_DIR.mkdir(exist_ok=True)
 
 # FFmpeg configuration
 FFMPEG_PATH = os.environ.get('FFMPEG_PATH', 'ffmpeg')
@@ -67,6 +75,7 @@ class Config:
     DOWNLOAD_DIR = DOWNLOAD_DIR
     OUTPUT_DIR = OUTPUT_DIR
     SESSION_DIR = SESSION_DIR
+    THUMB_DIR = THUMB_DIR
     
     # FFmpeg
     FFMPEG_PATH = FFMPEG_PATH
