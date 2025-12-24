@@ -6,6 +6,10 @@ from bot import run_bot
 from web_server import run_server
 from subtitle_embedder import check_ffmpeg
 from config import BOT_TOKEN, API_ID, API_HASH
+from pyrogram import utils as pyroutils
+
+pyroutils.MIN_CHAT_ID = -999999999999
+pyroutils.MIN_CHANNEL_ID = -100999999999999
 
 # Configure logging
 logging.basicConfig(
