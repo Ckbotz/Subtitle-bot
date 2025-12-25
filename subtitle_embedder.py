@@ -2,7 +2,7 @@
 """
 Subtitle Embedder - Complete Bot Compatible Version
 Copies only video and audio streams, replaces original subtitles with new ones
-Fixed output path handling
+Fixed output path handling, subtitle encoding, and stream mapping
 """
 
 import os
@@ -197,113 +197,160 @@ def embed_multiple_subtitles(video_file, subtitle_files, output_file=None, langu
         bool: True if successful, False otherwise
     """
     
-    # Validate input video file
+    # ========== VALIDATION PHASE ==========
+    
+    # Validate input video file exists
     if not os.path.exists(video_file):
         logger.error(f"Video file not found: {video_file}")
         return False
     
-    # Validate subtitle files
+    # Validate subtitle files list is not empty
     if not subtitle_files or len(subtitle_files) == 0:
         logger.error("No subtitle files provided")
         return False
     
+    # Validate each subtitle file exists
     for sub_file in subtitle_files:
         if not os.path.exists(sub_file):
             logger.error(f"Subtitle file not found: {sub_file}")
             return False
     
-    # Convert to Path objects
-    video_path = Path(video_file)
+    # ========== PATH SETUP PHASE ==========
+    
+    # Convert to Path objects for safer handling
+    video_path = Path(video_file).resolve()  # resolve() gets absolute path
     
     # Generate output filename if not provided
     if output_file is None:
+        # Default: add "_with_subtitles" suffix to original filename
         output_file = video_path.parent / f"{video_path.stem}_with_subtitles{video_path.suffix}"
     
-    # Convert output to Path and ensure it's a clean path
-    output_path = Path(output_file)
+    # Convert output to Path and resolve to absolute path
+    output_path = Path(output_file).resolve()
     
     # Log the paths for debugging
-    logger.info(f"Input video path: {video_file}")
-    logger.info(f"Output video path: {output_file}")
+    logger.info(f"Input video path: {video_path}")
+    logger.info(f"Output video path: {output_path}")
     
-    # Ensure output directory exists
-    if not ensure_output_directory(output_file):
+    # Ensure output directory exists (create if needed)
+    if not ensure_output_directory(output_path):
         logger.error("Failed to create output directory")
         return False
     
-    # Check if output path is valid
+    # Double-check output directory exists after creation
     if not output_path.parent.exists():
         logger.error(f"Output directory does not exist: {output_path.parent}")
         return False
     
-    # Detect video container format
+    # Check if output directory is writable
+    if not os.access(output_path.parent, os.W_OK):
+        logger.error(f"Output directory is not writable: {output_path.parent}")
+        return False
+    
+    # ========== CONTAINER FORMAT DETECTION ==========
+    
+    # Detect video container format from extension
     video_ext = video_path.suffix.lower()
     is_mp4 = video_ext in ['.mp4', '.m4v']
     is_mkv = video_ext in ['.mkv', '.webm']
     
-    # Get info about original video
-    stream_counts = get_stream_count(video_file)
+    logger.info(f"Container format: {video_ext} (MP4: {is_mp4}, MKV: {is_mkv})")
+    
+    # ========== VIDEO STREAM ANALYSIS ==========
+    
+    # Get info about original video streams
+    stream_counts = get_stream_count(str(video_path))
     if stream_counts:
         logger.info(f"Original video has: {stream_counts['video']} video, "
                    f"{stream_counts['audio']} audio, {stream_counts['subtitle']} subtitle streams")
     
-    # Build FFmpeg command
+    # ========== FFMPEG COMMAND CONSTRUCTION ==========
+    
+    # Start building FFmpeg command
     cmd = ['ffmpeg']
     
     # Add global options
-    cmd.extend(['-hide_banner', '-loglevel', 'warning'])
+    cmd.extend([
+        '-hide_banner',           # Hide FFmpeg banner
+        '-loglevel', 'warning',   # Show only warnings and errors
+        '-nostdin',               # Disable stdin interaction (important for bots)
+        '-y'                      # Overwrite output file without asking
+    ])
     
     # Input video file
-    cmd.extend(['-i', str(video_file)])
+    cmd.extend(['-i', str(video_path)])
     
-    # Add all subtitle files as inputs
+    # Add all subtitle files as inputs with UTF-8 encoding enforcement
     for sub_file in subtitle_files:
-        cmd.extend(['-i', str(sub_file)])
+        # Force UTF-8 encoding for subtitle files to prevent corruption
+        cmd.extend([
+            '-sub_charenc', 'UTF-8',  # Set subtitle character encoding to UTF-8
+            '-i', str(Path(sub_file).resolve())
+        ])
     
-    # Map ONLY video and audio streams from original file (excludes original subtitles)
-    # The ? makes it optional - won't fail if stream type doesn't exist
-    cmd.extend(['-map', '0:v?'])  # Map all video streams
-    cmd.extend(['-map', '0:a?'])  # Map all audio streams
-    # Intentionally NOT mapping 0:s (subtitle streams) - this removes original subtitles
+    # ========== STREAM MAPPING (CRITICAL SECTION) ==========
+    
+    # Map ONLY video and audio streams from original file
+    # This EXCLUDES original subtitle streams (they will be replaced)
+    
+    # The '?' makes mapping optional - won't fail if stream type doesn't exist
+    cmd.extend(['-map', '0:v?'])  # Map all video streams from input 0
+    cmd.extend(['-map', '0:a?'])  # Map all audio streams from input 0
+    
+    # NOTE: We are NOT mapping 0:s (subtitle streams)
+    # This effectively removes all original subtitles
     
     # Map all new subtitle inputs
+    # Subtitle files start from input index 1 (0 is the video)
     for i in range(len(subtitle_files)):
-        cmd.extend(['-map', str(i + 1)])  # Map subtitle file (input index starts from 1)
+        cmd.extend(['-map', str(i + 1)])  # Map subtitle file i+1
     
-    # Copy video streams without re-encoding (preserves quality and speed)
+    # ========== CODEC CONFIGURATION ==========
+    
+    # Copy video streams without re-encoding (preserves quality, faster processing)
     cmd.extend(['-c:v', 'copy'])
     
     # Copy audio streams without re-encoding
     cmd.extend(['-c:a', 'copy'])
     
-    # Set subtitle codec based on container format
+    # ========== SUBTITLE CODEC SELECTION ==========
+    
+    # Subtitle codec depends on container format
     if is_mp4:
-        # MP4 container requires mov_text codec for subtitles
+        # MP4 container REQUIRES mov_text codec for subtitles
+        # Other subtitle formats will cause player compatibility issues
         cmd.extend(['-c:s', 'mov_text'])
         logger.info("Using mov_text codec for MP4 container")
+        
     elif is_mkv:
-        # MKV supports multiple subtitle formats
+        # MKV supports multiple subtitle formats natively
+        # We can preserve ASS/SSA styling for better subtitle appearance
         for i, sub_file in enumerate(subtitle_files):
             sub_format = get_subtitle_format(sub_file)
+            
             if sub_format == 'ass':
-                # Keep ASS format for styling
+                # Keep ASS format to preserve styling (colors, fonts, positions)
                 cmd.extend([f'-c:s:{i}', 'ass'])
+                logger.info(f"Subtitle {i+1}: Using ASS codec (preserves styling)")
             else:
-                # Use SRT for other formats
+                # Use SRT for other formats (most compatible)
                 cmd.extend([f'-c:s:{i}', 'srt'])
-        logger.info("Using native subtitle codecs for MKV container")
+                logger.info(f"Subtitle {i+1}: Using SRT codec")
+        
     else:
-        # For other containers, try SRT
+        # For other containers (AVI, FLV, etc.), default to SRT
         cmd.extend(['-c:s', 'srt'])
         logger.info(f"Using SRT codec for {video_ext} container")
     
+    # ========== SUBTITLE METADATA CONFIGURATION ==========
+    
     # Add metadata for each subtitle track
     for i, sub_file in enumerate(subtitle_files):
-        # Set language code
+        # Set language code (ISO 639-2 format: eng, spa, fre, etc.)
         lang = languages[i] if languages and i < len(languages) else 'und'
         cmd.extend([f'-metadata:s:s:{i}', f'language={lang}'])
         
-        # Set title
+        # Set subtitle track title (shown in player)
         if titles and i < len(titles):
             title = titles[i]
         else:
@@ -311,39 +358,44 @@ def embed_multiple_subtitles(video_file, subtitle_files, output_file=None, langu
             title = Path(sub_file).stem
         cmd.extend([f'-metadata:s:s:{i}', f'title={title}'])
         
-        # Set first subtitle as default
+        # Set disposition (default/forced flags)
         if i == 0:
+            # First subtitle is marked as default (auto-selected in player)
             cmd.extend([f'-disposition:s:{i}', 'default'])
         else:
+            # Other subtitles are not default (user must manually select)
             cmd.extend([f'-disposition:s:{i}', '0'])
     
-    # Additional options for better compatibility
+    # ========== ADDITIONAL OPTIONS FOR COMPATIBILITY ==========
+    
     cmd.extend([
-        '-movflags', '+faststart',  # Enable fast start for MP4 (web streaming)
-        '-max_muxing_queue_size', '9999',  # Prevent muxing queue overflow
-        '-y'  # Overwrite output file without asking
+        '-movflags', '+faststart',          # Enable fast start for MP4 (web streaming optimization)
+        '-max_muxing_queue_size', '9999',   # Prevent muxing queue overflow (fixes async issues)
     ])
     
-    # Add output file (ensure it's a string)
-    cmd.append(str(output_file))
+    # Add output file (convert to string to ensure compatibility)
+    cmd.append(str(output_path))
     
-    # Log processing information
+    # ========== LOGGING ==========
+    
     logger.info("="*60)
     logger.info("Starting subtitle embedding process")
-    logger.info(f"Input video: {video_file}")
+    logger.info(f"Input video: {video_path}")
     logger.info(f"Number of subtitle tracks: {len(subtitle_files)}")
     for i, sub_file in enumerate(subtitle_files):
         lang = languages[i] if languages and i < len(languages) else 'und'
         logger.info(f"  [{i+1}] {Path(sub_file).name} (language: {lang})")
-    logger.info(f"Output video: {output_file}")
+    logger.info(f"Output video: {output_path}")
     logger.info(f"Container format: {video_ext}")
     logger.info("="*60)
     
-    # Log FFmpeg command for debugging
+    # Log FFmpeg command for debugging (only in debug mode)
     logger.debug(f"FFmpeg command: {' '.join(cmd)}")
     
+    # ========== FFMPEG EXECUTION ==========
+    
     try:
-        # Execute FFmpeg command
+        # Execute FFmpeg command with timeout protection
         result = subprocess.run(
             cmd,
             stdout=subprocess.PIPE,
@@ -352,33 +404,40 @@ def embed_multiple_subtitles(video_file, subtitle_files, output_file=None, langu
             timeout=3600  # 1 hour timeout for large files
         )
         
+        # ========== RESULT VERIFICATION ==========
+        
         if result.returncode == 0:
-            # Check if output file was created
-            if os.path.exists(output_file):
-                output_size = os.path.getsize(output_file)
-                logger.info(f"✓ Successfully created: {output_file}")
+            # FFmpeg succeeded, verify output file was created
+            if os.path.exists(output_path):
+                output_size = os.path.getsize(output_path)
+                logger.info(f"✓ Successfully created: {output_path}")
                 logger.info(f"✓ Output file size: {output_size / (1024*1024):.2f} MB")
                 
                 # Verify output file has the expected streams
-                output_counts = get_stream_count(output_file)
+                output_counts = get_stream_count(str(output_path))
                 if output_counts:
                     logger.info(f"✓ Output video has: {output_counts['video']} video, "
                               f"{output_counts['audio']} audio, {output_counts['subtitle']} subtitle streams")
+                    
+                    # Verify subtitle count matches expected
+                    if output_counts['subtitle'] != len(subtitle_files):
+                        logger.warning(f"⚠ Expected {len(subtitle_files)} subtitles, but found {output_counts['subtitle']}")
                 
                 return True
             else:
-                logger.error(f"✗ Output file was not created: {output_file}")
-                logger.error(f"Expected output path: {output_file}")
+                # FFmpeg succeeded but file doesn't exist (rare edge case)
+                logger.error(f"✗ Output file was not created: {output_path}")
+                logger.error(f"Expected output path: {output_path}")
                 logger.error(f"Output directory exists: {output_path.parent.exists()}")
                 logger.error(f"Output directory writable: {os.access(output_path.parent, os.W_OK)}")
                 return False
         else:
+            # FFmpeg failed, log detailed error information
             logger.error("✗ FFmpeg processing failed")
             logger.error(f"Return code: {result.returncode}")
             
-            # Log stderr for debugging
+            # Log stderr for debugging (last 50 lines to avoid spam)
             if result.stderr:
-                # Only log last 50 lines to avoid spam
                 stderr_lines = result.stderr.split('\n')
                 logger.error("FFmpeg stderr (last 50 lines):")
                 for line in stderr_lines[-50:]:
@@ -388,11 +447,17 @@ def embed_multiple_subtitles(video_file, subtitle_files, output_file=None, langu
             return False
             
     except subprocess.TimeoutExpired:
+        # FFmpeg process exceeded timeout
         logger.error("✗ FFmpeg process timeout (exceeded 1 hour)")
+        logger.error("This usually happens with extremely large files or system resource issues")
         return False
+        
     except Exception as e:
+        # Unexpected exception during FFmpeg execution
         logger.error(f"✗ Exception during FFmpeg processing: {e}")
         logger.error(f"Exception type: {type(e).__name__}")
+        
+        # Log full traceback for debugging
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
         return False
@@ -407,33 +472,44 @@ def validate_subtitle_file(subtitle_file):
     Returns:
         bool: True if valid, False otherwise
     """
+    # Check file exists
     if not os.path.exists(subtitle_file):
         logger.error(f"Subtitle file not found: {subtitle_file}")
         return False
     
-    # Check file size
+    # Check file is not empty
     file_size = os.path.getsize(subtitle_file)
     if file_size == 0:
         logger.error(f"Subtitle file is empty: {subtitle_file}")
         return False
     
+    # Warn if file is unusually large (might be corrupt or wrong file)
     if file_size > 10 * 1024 * 1024:  # 10 MB
         logger.warning(f"Subtitle file is very large ({file_size / (1024*1024):.2f} MB): {subtitle_file}")
     
-    # Check file extension
+    # Check file extension is valid
     ext = Path(subtitle_file).suffix.lower()
     valid_extensions = ['.srt', '.ass', '.ssa', '.vtt', '.sub']
     if ext not in valid_extensions:
         logger.error(f"Unsupported subtitle format: {ext}")
         return False
     
-    # Try to read first few lines
+    # Try to read first few lines to ensure file is readable
     try:
         with open(subtitle_file, 'r', encoding='utf-8') as f:
             first_line = f.readline()
             if not first_line:
                 logger.error(f"Could not read subtitle file: {subtitle_file}")
                 return False
+    except UnicodeDecodeError:
+        # File is not UTF-8, try with latin-1 or other encodings
+        logger.warning(f"Subtitle file is not UTF-8 encoded: {subtitle_file}")
+        try:
+            with open(subtitle_file, 'r', encoding='latin-1') as f:
+                first_line = f.readline()
+        except Exception as e:
+            logger.error(f"Error reading subtitle file with alternate encoding: {e}")
+            return False
     except Exception as e:
         logger.error(f"Error reading subtitle file: {e}")
         return False
